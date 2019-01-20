@@ -1,0 +1,465 @@
+Mappings:
+  # Network ID and IP ranges to assign in our subnets. Those are in the CIDR
+  # notation. It basically tells what part of the address is reserved for IPs
+  # and what part is for the network ID. E.g. 10.0.0.0/24 would mean that the
+  # first 3 octets (3 x 8 = 24) are going to be entirely reserved for the
+  # network, which would result in all the IPs that are given out would start
+  # with 10.0.0.x.
+  SubnetConfig:
+    VPC:
+      CIDR: 10.0.0.0/16
+    PublicOne:
+      CIDR: 10.0.0.0/24
+    PublicTwo:
+      CIDR: 10.0.1.0/24
+    PrivateOne:
+      CIDR: 10.0.2.0/24
+
+Resources:
+  # VIRTUAL PRIVATE CLOUD =====================================================
+  # VPC our containers will be using. A VPC is simply a logically isolated
+  # chunk on the AWS Cloud.
+  #
+  # Out VPC has two public subnetworks since it's a requirement for Application
+  # Load Balancers. Nginx will use one of the public subnets.
+  #
+  # Then one private subnet to be used by the backend and frontend containers.
+  # We do not want them to be reachable (public-facing).
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: !FindInMap [SubnetConfig, VPC, CIDR]
+      Tags:
+        - Key: Name
+          Value: ECSFS VPC
+
+  PublicSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      # Selects the first availability zone on our current region.
+      #   See Fn::Select (intrinsic function)
+      AvailabilityZone: !Select
+        - 0  # First availability zone.
+        - Fn::GetAZs: !Ref AWS::Region
+      CidrBlock: !FindInMap [SubnetConfig, PublicOne, CIDR]
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: ECSFS Public Subnet 1
+
+  PublicSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 1  # Second availability zone.
+        - Fn::GetAZs: !Ref AWS::Region
+      CidrBlock: !FindInMap [SubnetConfig, PublicTwo, CIDR]
+      MapPublicIpOnLaunch: true  # TODO: Is it needed?
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: ECSFS Public Subnet 2
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref AWS::Region
+      CidrBlock: !FindInMap [SubnetConfig, PrivateOne, CIDR]
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: ECSFS Private Subnet 1
+
+  # Routing and networking for public resources.
+  # - Internet Gateway:
+  #     Allows communication between the containers and the internet. All the
+  #     outbound traffic goes through it. In AWS it must get attached to a VPC.
+  #     It needs to be attached to the VPC we created.
+  #     All requests from a instances runnning on the public subnet must be
+  #     routed to the internet gateway.
+  #
+  # - Network Address Translation (NAT) Gateway:
+  #     When an application is running on a private subnet it cannot talk to
+  #     the outside world. The NAT Gateway remaps the IP address of the packets
+  #     sent from the private instance assigning them a public IP so when the
+  #     service the instance wants to talk you replies, the NAT can receive the
+  #     information and hand it back out to the private instance.
+  #
+  #     An Elastic IP needs to be associated with each NAT Gateway we create.
+  #
+  # - Routes and Route Tables:
+  #     Route tables act as containers for routes. A route describes where do
+  #     packets need to go based on rules. You can for instance send anything
+  #     with destination address starting with 10.0.4.x to a NAT and anything
+  #     starting with 10.0.5.x to another NAT or internet gateway (I cannot
+  #     find a proper example sorry). You can describe both in and outbound
+  #     rules.
+  # 
+  #     The way we associate a route table with a subnet is by using AWS's
+  #     "Subnet Route Table Association" resources, pretty descriptives"
+
+  # Public routing.
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetOne
+
+  PublicSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetTwo
+
+  # Private routing.
+  NatElasticIP:
+    Type: AWS::EC2::EIP
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatElasticIP.AllocationId
+      SubnetId: !Ref PublicSubnetOne
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet
+ 
+  # SECURITY ==================================================================
+  # A security group shared by all containers running on Fargate. Security
+  # groups act as firewalls between internal and external communications of the
+  # instances we run.
+  # 
+  # For our stack we have two security groups.
+  # 1. To allow traffic coming from the Application Load Balancer.
+  # 2. To allow traffic between running containers.
+  FargateContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to Fargate containers.
+      VpcId: !Ref VPC
+
+  IngressFromPublicALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress from the public Application Load Balancer.
+      GroupId: !Ref FargateContainerSecurityGroup
+      IpProtocol: -1  # Means all protocols (TCD, UDP or any ICMP/ICMPv6 number).
+      SourceSecurityGroupId: !Ref PublicLoadBalancerSecurityGroup
+
+  IngressFromOwnSecurityGroup:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress from other containers in the same security group.
+      GroupId: !Ref FargateContainerSecurityGroup
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref FargateContainerSecurityGroup
+
+  PublicLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the public facing load balancer.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+
+  # LOAD BALANCER =============================================================
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: ecsfs-target-group
+      Port: 80
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VPC
+
+  ListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref PublicLoadBalancerSecurityGroup
+      Subnets:
+        - !Ref PublicSubnetOne
+        - !Ref PublicSubnetTwo
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: lethim.be.
+      Name: ecsfs.lethim.be.
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt LoadBalancer.DNSName
+        HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID
+
+  # TODO: AWS::ApplicationAutoScaling::ScalableTarget
+  # TODO: AWS::ApplicationAutoScaling::ScalingPolicy
+
+  # ELASTIC CONTAINER SERVICE =================================================
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: ecsfs-cluster
+
+  # Logging configuration.
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: ecsfs-logs
+
+  # Task Definitions ----------------------------------------------------------
+  NginxTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: LogGroup
+    Properties:
+      Family: ecsfs-nginx-td
+      Cpu: 256
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !Ref ExecutionRole 
+      TaskRoleArn: !Ref TaskRole
+      ContainerDefinitions:
+        - Name: ecsfs-nginx-container
+          Image: docwhite/ecsfs-nginx
+          PortMappings:
+            - ContainerPort: 80
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: ecsfs-logs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: nginx
+
+  BackendTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: LogGroup
+    Properties:
+      Family: ecsfs-backend-td
+      Cpu: 256
+      Memory: 1024
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !Ref ExecutionRole
+      TaskRoleArn: !Ref TaskRole
+      ContainerDefinitions:
+        - Name: ecsfs-backend-container
+          Image: docwhite/ecsfs-backend
+          PortMappings:
+            - ContainerPort: 5000
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: ecsfs-logs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: backend
+
+  FrontendTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: LogGroup
+    Properties:
+      Family: ecsfs-frontend-td
+      Cpu: 256
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !Ref ExecutionRole
+      TaskRoleArn: !Ref TaskRole
+      ContainerDefinitions:
+        - Name: ecsfs-frontend-container
+          Image: docwhite/ecsfs-frontend
+          PortMappings:
+            - ContainerPort: 3000
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: ecsfs-logs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: frontend
+
+  # IAM Roles -----------------------------------------------------------------
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsfs-execution-role
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsfs-task-role
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+
+  # TODO: AutoScalingRole: Type: AWS::IAM::Role
+
+  # Services ------------------------------------------------------------------
+  NginxService:
+    Type: AWS::ECS::Service
+    DependsOn: ListenerHTTP
+    Properties:
+      ServiceName: ecsfs-nginx-service
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      DesiredCount: 1
+      ServiceRegistries:
+        - RegistryArn: !GetAtt NginxLocalDiscoveryService.Arn
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref FargateContainerSecurityGroup
+          Subnets:
+            - !Ref PublicSubnetOne
+            - !Ref PublicSubnetTwo
+      TaskDefinition: !Ref NginxTaskDefinition
+      LoadBalancers:
+        - ContainerName: ecsfs-nginx-container
+          ContainerPort: 80
+          TargetGroupArn: !Ref TargetGroup
+
+  BackendService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: ecsfs-backend-service
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      DesiredCount: 1
+      ServiceRegistries:
+        - RegistryArn: !GetAtt BackendLocalDiscoveryService.Arn
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref FargateContainerSecurityGroup
+          Subnets:
+            - !Ref PrivateSubnet
+      TaskDefinition: !Ref BackendTaskDefinition
+
+  FrontendService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: ecsfs-frontend-service
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      DesiredCount: 1
+      ServiceRegistries:
+        - RegistryArn: !GetAtt FrontendLocalDiscoveryService.Arn
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref FargateContainerSecurityGroup
+          Subnets:
+            - !Ref PrivateSubnet
+      TaskDefinition: !Ref FrontendTaskDefinition
+
+  # SERVICE DISCOVERY =========================================================
+  LocalNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Vpc: !Ref VPC
+      Name: local
+
+  NginxLocalDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: ecsfs-nginx
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+        NamespaceId: !GetAtt LocalNamespace.Id
+
+  BackendLocalDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: ecsfs-backend
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+      NamespaceId: !GetAtt LocalNamespace.Id
+
+  FrontendLocalDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: ecsfs-frontend
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+      NamespaceId: !GetAtt LocalNamespace.Id
+  # TODO: ROUTE 53 ============================================================

@@ -3,26 +3,26 @@ services:
   frontend:
     restart: always
     build: ./frontend
+    ports:
+      - "3000:3000"
     networks:
       ecsfs:
         aliases:
-          - ecsfs.frontend
+          - ecsfs-frontend.local
   backend:
     restart: always
     build: ./backend
     networks:
       ecsfs:
         aliases:
-          - ecsfs.backend
+          - ecsfs-backend.local
   nginx:
     restart: always
     build: ./nginx
-    networks:
-      ecsfs:
-        aliases:
-          - ecsfs.nginx
     ports:
       - "80:80"
+    networks:
+      ecsfs:
 
 networks:
   ecsfs:
