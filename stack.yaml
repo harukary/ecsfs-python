@@ -1,67 +1,149 @@
-Mappings:
-  # Network ID and IP ranges to assign in our subnets. Those are in the CIDR
-  # notation. It basically tells what part of the address is reserved for IPs
-  # and what part is for the network ID. E.g. 10.0.0.0/24 would mean that the
-  # first 3 octets (3 x 8 = 24) are going to be entirely reserved for the
-  # network, which would result in all the IPs that are given out would start
-  # with 10.0.0.x.
-  SubnetConfig:
-    VPC:
-      CIDR: 10.0.0.0/16
-    PublicOne:
-      CIDR: 10.0.0.0/24
-    PublicTwo:
-      CIDR: 10.0.1.0/24
-    PrivateOne:
-      CIDR: 10.0.2.0/24
+# ==========================================================================
+# ecsfs: Individually-Scalable Multi-Containerized Microservice Architecture
+# ==========================================================================
+# This CloudFormation stack shows how to deploy a full-stack application
+# consisting of a backend, a frontend and an nginx server. Each defined as an
+# independent service (speaking in AWS Fargate terms).
+#
+# Two articles have been written explaining what this stack is for:
+#
+# - <Link Pt. 1>
+# - <Link Pt. 2>
+#
+# How to deploy this YAML template
+# --------------------------------
+#
+# Either using command line (1) or from the web console (2).
+#
+# 1. From the command line.
+#   First you will need to install and configure the AWS CLI. Read the docs:
+#
+#   - https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-install.html
+#   - https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-configure.html
+#
+#   TL;DR: Basically you will need to install it with pip:
+#
+#     pip install awscli --upgrade --user 
+#
+#   And configure it (specify your default region too so you don't have to type
+#   it on each subsequent command):
+#
+#     aws configure
+#
+#   To actually deploy the stack you have two choices (a) and (b)...
+#
+#   a) If you have no hosted zones set up (associated with a Route 53 domain):
+#
+#        aws cloudformation create-stack \
+#          --stack-name ecsfs \
+#          --template-body file://$(pwd)/stack.yaml \
+#          --capabilities CAPABILITY_NAMED_IAM \
+#          --parameters ParameterKey=HostedZoneName,ParameterValue=
+#
+#   b) if you have a hosted zone, you can pass it in an the application will
+#      be available under the subdomain ecsfs.<your-hosted-zone-name>. For that
+#      simply pass the parameter flag instead of leaving it empty.
+#
+#        --parameters ParameterKey=HostedZoneName,ParameterValue=foo.com
+#
+# 2. From the CloudFormation section on your AWS Console.
+#   - Click the "Create Stack" button.
+#   - Click on "Choose File" and upload this stack.yaml file.
+#   - Give the Stack a name: "ecsfs".
+#   - In the parameters section, you will see "HostedZoneName". It is up to you
+#     if you want to use one of your hosted zones (domains) for instance
+#     foo.com so the application would then be configured to run on a
+#     subdomain of it (ecsfs.foo.com). You can leave it empty.
+#   - Click "Next".
+#   - Click "Next" one more time.
+#   - On the "Capabilities" section check the box "I acknowledge that..."
+#
+# Deleting all the resources that have been created
+# -------------------------------------------------
+# Either from the web console or from CLI. To do it from the web Console you
+# will need to go under the CloudFormation section and delete it from there. If
+# you decide command line then:
+#
+#   aws cloudformation delete-stack --stack-name ecsfs
+#
+
+# PARAMETERS ==================================================================
+# Options the user can provide when deploying the stack that can be accessed
+# within the resource definitions.
+Parameters:
+  HostedZoneName:
+    Type: String
+    Description:
+      (Optional) If you have a domain available registered with Route 53 you
+      can type it (e.g. foo.com). By doing it, a DNS record is going to get
+      created on subdomain ecsfs.foo.com that will point to the application
+      load balancer (the entry point of this application).
+
+# CONDITIONS ==================================================================
+# Allows to define boolean variables that we can use to conditionally build
+# some resources. You can set conditions for resource building by adding the
+# Conditions yaml property under the resource.
+Conditions:
+  HasHostedZoneName:
+    Fn::Not:
+    - Fn::Equals:
+      - ""
+      - Fn::Ref HostedZoneName
 
 Resources:
-  # VIRTUAL PRIVATE CLOUD =====================================================
+  # VIRTUAL PRIVATE CLOUD (VPC) ===============================================
   # VPC our containers will be using. A VPC is simply a logically isolated
-  # chunk on the AWS Cloud.
+  # chunk of the AWS Cloud.
   #
-  # Out VPC has two public subnetworks since it's a requirement for Application
+  # Our VPC has two public subnetworks since it's a requirement for Application
   # Load Balancers. Nginx will use one of the public subnets.
   #
   # Then one private subnet to be used by the backend and frontend containers.
   # We do not want them to be reachable (public-facing).
+  #
+  # You will the word CIDR in various places, it is used for subnet masking.
+  #
+  #   CIDR blocks describe the Network ID and IP ranges to assign in our
+  #   I subnets. It basically tells what part of the address is reserved for
+  #   IPs and what part is for the network ID.
+  #
+  #   E.g. 10.0.0.0/24 would mean that the first 3 octets (3 x 8 = 24) are
+  #   going to be exclusively defining the Network ID, which would result in
+  #   all the IPs that are given out would start with 10.0.0.x.
+  #
+  # This video explains it very well:
+  #
+  # - IPv4 Addressing: Network IDs and Subnet Masks
+  #   https://youtu.be/XQ3T14SIlV4
+  #
   VPC:
     Type: AWS::EC2::VPC
     Properties:
       EnableDnsSupport: true
       EnableDnsHostnames: true
-      CidrBlock: !FindInMap [SubnetConfig, VPC, CIDR]
-      Tags:
-        - Key: Name
-          Value: ECSFS VPC
+      CidrBlock: 10.0.0.0/16
+      Tags:                   # You can give
+        - Key: Name           # pretty names to
+          Value: ECSFS VPC    # your resources
 
   PublicSubnetOne:
     Type: AWS::EC2::Subnet
     Properties:
       # Selects the first availability zone on our current region.
-      #   See Fn::Select (intrinsic function)
-      AvailabilityZone: !Select
-        - 0  # First availability zone.
+      AvailabilityZone: !Select  # Look up "Fn::Select intrinsic function"
+        - 0  # First availability zone. A region has various zones.
         - Fn::GetAZs: !Ref AWS::Region
-      CidrBlock: !FindInMap [SubnetConfig, PublicOne, CIDR]
-      MapPublicIpOnLaunch: true
+      CidrBlock: 10.0.0.0/24
       VpcId: !Ref VPC
-      Tags:
-        - Key: Name
-          Value: ECSFS Public Subnet 1
 
   PublicSubnetTwo:
     Type: AWS::EC2::Subnet
     Properties:
       AvailabilityZone: !Select
-        - 1  # Second availability zone.
+        - 1  # Second availability zone under the same region.
         - Fn::GetAZs: !Ref AWS::Region
-      CidrBlock: !FindInMap [SubnetConfig, PublicTwo, CIDR]
-      MapPublicIpOnLaunch: true  # TODO: Is it needed?
+      CidrBlock: 10.0.1.0/24
       VpcId: !Ref VPC
-      Tags:
-        - Key: Name
-          Value: ECSFS Public Subnet 2
 
   PrivateSubnet:
     Type: AWS::EC2::Subnet
@@ -69,40 +151,43 @@ Resources:
       AvailabilityZone: !Select
         - 0
         - Fn::GetAZs: !Ref AWS::Region
-      CidrBlock: !FindInMap [SubnetConfig, PrivateOne, CIDR]
-      MapPublicIpOnLaunch: false
+      CidrBlock: 10.0.2.0/24
       VpcId: !Ref VPC
-      Tags:
-        - Key: Name
-          Value: ECSFS Private Subnet 1
 
-  # Routing and networking for public resources.
+  # NETWORK SETUP: ROUTING AND SUBNETTING =====================================
+  # Let's revisit the main elements that comform a subnet and how we are going
+  # to use them in our case application.
+  #
   # - Internet Gateway:
+  #
   #     Allows communication between the containers and the internet. All the
   #     outbound traffic goes through it. In AWS it must get attached to a VPC.
-  #     It needs to be attached to the VPC we created.
   #     All requests from a instances runnning on the public subnet must be
-  #     routed to the internet gateway.
+  #     routed to the internet gateway, we achieve that by defining it on route
+  #     tables.
   #
   # - Network Address Translation (NAT) Gateway:
+  #
   #     When an application is running on a private subnet it cannot talk to
   #     the outside world. The NAT Gateway remaps the IP address of the packets
   #     sent from the private instance assigning them a public IP so when the
   #     service the instance wants to talk you replies, the NAT can receive the
-  #     information and hand it back out to the private instance.
+  #     information (since the NAT itself is public-facing and rechable from
+  #     the outside) and hand it back out to the private instance.
   #
   #     An Elastic IP needs to be associated with each NAT Gateway we create.
   #
   # - Routes and Route Tables:
-  #     Route tables act as containers for routes. A route describes where do
-  #     packets need to go based on rules. You can for instance send anything
-  #     with destination address starting with 10.0.4.x to a NAT and anything
-  #     starting with 10.0.5.x to another NAT or internet gateway (I cannot
-  #     find a proper example sorry). You can describe both in and outbound
-  #     rules.
+  #
+  #     Route tables gather together a set of routes. A route describes where
+  #     do packets need to go based on rules. You can for instance send
+  #     any packets with destination address starting with 10.0.4.x to a NAT
+  #     while others with destination address 10.0.5.x to another NAT or
+  #     internet gateway (I cannot find a proper example, I apologize). You can
+  #     describe both in and outbound routes.
   # 
   #     The way we associate a route table with a subnet is by using AWS's
-  #     "Subnet Route Table Association" resources, pretty descriptives"
+  #     "Subnet Route Table Association" resources, pretty descriptive.
 
   # Public routing.
   InternetGateway:
@@ -168,10 +253,10 @@ Resources:
  
   # SECURITY ==================================================================
   # A security group shared by all containers running on Fargate. Security
-  # groups act as firewalls between internal and external communications of the
+  # groups act as firewalls between inbound and outbound communications of the
   # instances we run.
   # 
-  # For our stack we have two security groups.
+  # The stack has one security group with two ingress (inbound traffic) rules:
   # 1. To allow traffic coming from the Application Load Balancer.
   # 2. To allow traffic between running containers.
   FargateContainerSecurityGroup:
@@ -188,7 +273,7 @@ Resources:
       IpProtocol: -1  # Means all protocols (TCD, UDP or any ICMP/ICMPv6 number).
       SourceSecurityGroupId: !Ref PublicLoadBalancerSecurityGroup
 
-  IngressFromOwnSecurityGroup:
+  IngressFromSelfSecurityGroup:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Ingress from other containers in the same security group.
@@ -202,10 +287,26 @@ Resources:
       GroupDescription: Access to the public facing load balancer.
       VpcId: !Ref VPC
       SecurityGroupIngress:
-        - CidrIp: 0.0.0.0/0
+        - CidrIp: 0.0.0.0/0  # Allows all IPs. Traffic from anywhere.
           IpProtocol: -1
 
   # LOAD BALANCER =============================================================
+  # The Application Load Balancer (ALB) is the single point of contact for
+  # clients. It is in charge of relaying the request to the right instance. For
+  # our case all requests on port 80 are sent to the container running nginx.
+  #
+  # To configure a load balancer we need to specify a listener and a target
+  # group. The listener is described through rules, where you can specify
+  # different targets to route to based on port or URL. The target group is the
+  # set of resources that would receive the routed requests from the ALB.
+  #
+  # This target group will be managed by Fargate and every time a new instance
+  # of nginx spins up then it will register it automatically on this group.
+  #
+  # More information:
+  #
+  #   https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html
+  #
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -234,30 +335,95 @@ Resources:
       Subnets:
         - !Ref PublicSubnetOne
         - !Ref PublicSubnetTwo
+
+  # If a hosted zone got specified when running this stack, we create a
+  # subdomain on that zone and route it to the ALB.
   DNSRecord:
     Type: AWS::Route53::RecordSet
+    Condition: HasHostedZoneName
     Properties:
-      HostedZoneName: lethim.be.
-      Name: ecsfs.lethim.be.
+      HostedZoneName: lethim.be.  # TODO: use the string given by the user.
+      Name: ecsfs.lethim.be.      # TODO: ditto.
       Type: A
       AliasTarget:
         DNSName: !GetAtt LoadBalancer.DNSName
         HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID
 
-  # TODO: AWS::ApplicationAutoScaling::ScalableTarget
-  # TODO: AWS::ApplicationAutoScaling::ScalingPolicy
 
   # ELASTIC CONTAINER SERVICE =================================================
+  # ECS is a container management system. It basically removes the headache of
+  # having to setup and provision another management infrastructure such as
+  # Kubernetes or similar.
+  #
+  # You define your application in ECS through **task definitions**, they act
+  # as blueprints which describe what containers to use, ports to open, what
+  # launch type to use (EC2 instances or Fargate), and what memory and CPU
+  # requirements need to be met.
+  #
+  # Then a service is in charge of taking those tasks definitions and generate
+  # running and managing instances of them in a **cluster**. Those running
+  # processes instanciated by the service are called **tasks**.
+  #
+  # Key ideas:
+  #   * A cluster is a grouping of resources.
+  #   * On a _task definition_...
+  #     - You can describe 1+ containers.
+  #     - Desired CPU and memory.
+  #   * A service takes a _task definition_ and instanciates running _tasks_.
+  #   * _Task definitions_ and _services_ are configured per-cluster.
+  #   * _Tasks_ run in a cluster.
+  #   * Auto-scaling is configured on the service-level.
+  #
+  # Learn more:
+  #
+  #   https://docs.aws.amazon.com/AmazonECS/latest/developerguide/Welcome.html
+  #
+
+  # Cluster -------------------------------------------------------------------
   ECSCluster:
     Type: AWS::ECS::Cluster
     Properties:
       ClusterName: ecsfs-cluster
 
-  # Logging configuration.
+  # Logging -------------------------------------------------------------------
+  # Throws all logs from tasks within our cluster under the same group. There
+  # is one log stream per task running. An aggregated result can be viewed from
+  # the web Console under the page for the service the task is part of.
   LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: ecsfs-logs
+
+  # IAM Roles -----------------------------------------------------------------
+  # We need to allow Fargate to perform specific actions on our behalf.
+  # - ECS Task Role: allows your ECS containers to have the right permissions
+  #   and credentials needed to use the AWS APIs successfully.
+  # - ECS Task Execution Role: needed to be able to use the AWS logging system.
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsfs-execution-role
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+
+  #TaskRole:
+  #  Type: AWS::IAM::Role
+  #  Properties:
+  #    RoleName: ecsfs-task-role
+  #    AssumeRolePolicyDocument:
+  #      Statement:
+  #        - Effect: Allow
+  #          Principal:
+  #            Service: ecs-tasks.amazonaws.com
+  #          Action: 'sts:AssumeRole'
+
+  # TODO: AutoScalingRole: Type: AWS::IAM::Role
 
   # Task Definitions ----------------------------------------------------------
   NginxTaskDefinition:
@@ -271,7 +437,7 @@ Resources:
       RequiresCompatibilities:
         - FARGATE
       ExecutionRoleArn: !Ref ExecutionRole 
-      TaskRoleArn: !Ref TaskRole
+      #TaskRoleArn: !Ref TaskRole
       ContainerDefinitions:
         - Name: ecsfs-nginx-container
           Image: docwhite/ecsfs-nginx
@@ -295,7 +461,7 @@ Resources:
       RequiresCompatibilities:
         - FARGATE
       ExecutionRoleArn: !Ref ExecutionRole
-      TaskRoleArn: !Ref TaskRole
+      #TaskRoleArn: !Ref TaskRole
       ContainerDefinitions:
         - Name: ecsfs-backend-container
           Image: docwhite/ecsfs-backend
@@ -319,7 +485,7 @@ Resources:
       RequiresCompatibilities:
         - FARGATE
       ExecutionRoleArn: !Ref ExecutionRole
-      TaskRoleArn: !Ref TaskRole
+      #TaskRoleArn: !Ref TaskRole
       ContainerDefinitions:
         - Name: ecsfs-frontend-container
           Image: docwhite/ecsfs-frontend
@@ -332,34 +498,23 @@ Resources:
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: frontend
 
-  # IAM Roles -----------------------------------------------------------------
-  ExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: ecsfs-execution-role
-      AssumeRolePolicyDocument:
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ecs-tasks.amazonaws.com
-            Action: 'sts:AssumeRole'
-      ManagedPolicyArns:
-        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
-
-  TaskRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: ecsfs-task-role
-      AssumeRolePolicyDocument:
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ecs-tasks.amazonaws.com
-            Action: 'sts:AssumeRole'
-
-  # TODO: AutoScalingRole: Type: AWS::IAM::Role
-
   # Services ------------------------------------------------------------------
+  # An important thing to consider with our setup is how are the containers
+  # going to be able to reach to each other.
+  #
+  # A way you can do that is by making the tasks run by the services
+  # addressable through DNS names, that is, fixed names that will resolve to
+  # (possibly) dynamically changing IPs.
+  #
+  # In our application, we want the backend to be reachable at 
+  # ecsfs-backend.local, the frontend at ecsfs-backend.local and so on. You can
+  # see the names are suffixed. In AWS we can create a PrivateDnsService
+  # resource and add services to them, and would yield the same names, that is,
+  # <service_name>.<private_dns_namespace>.
+
+  # The application load balancer routes the requests to the nginx service,
+  # therefore we need to wait for the ALB to finish before we can actually spin
+  # up the nginx service.
   NginxService:
     Type: AWS::ECS::Service
     DependsOn: ListenerHTTP
@@ -420,7 +575,19 @@ Resources:
             - !Ref PrivateSubnet
       TaskDefinition: !Ref FrontendTaskDefinition
 
+  # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-auto-scaling.html
+  # TODO: AWS::ApplicationAutoScaling::ScalableTarget
+  # TODO: AWS::ApplicationAutoScaling::ScalingPolicy
+
   # SERVICE DISCOVERY =========================================================
+  # By creating various DNS names under the same namespace, services that get
+  # assigned those names can talk between them, i.e. the frontend talking to 
+  # a backend, or nginx talking to the frontend.
+  #
+  # There is a whole section on the documentation explaining it in detail:
+  #
+  #   https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-discovery.html
+  #
   LocalNamespace:
     Type: AWS::ServiceDiscovery::PrivateDnsNamespace
     Properties:
@@ -462,4 +629,16 @@ Resources:
           - Type: A
             TTL: 60
       NamespaceId: !GetAtt LocalNamespace.Id
-  # TODO: ROUTE 53 ============================================================
+
+# OUTPUTS =====================================================================
+# The entries defined as outputs will show in the stack page in the Amazon
+# Console (website) under the CloudFormation section. We expose the load
+# balancer DNS name so you can copy-paste it on your browser to see the app
+# running:
+#
+#   http://<your-application-load-balancer-dns-name>
+#
+Outputs:
+  LoadBalancerDNSName:
+    Description: Copy and paste this value into your browser to access the app.
+    Value: !GetAtt LoadBalancer.DNSName
