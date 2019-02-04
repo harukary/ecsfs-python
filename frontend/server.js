@@ -4,7 +4,6 @@ const request = require('request')
 const app = express()
 const port = 3000
 
-
 app.get('/', (req, res) => {
 
   // The frontend greets with the following:
