@@ -83,6 +83,7 @@ Parameters:
 # Allows to define boolean variables that we can use to conditionally build
 # some resources. You can set conditions for resource building by adding the
 # Conditions yaml property under the resource.
+# TODO: Actually apply the conditions.
 Conditions:
   HasHostedZoneName:
     Fn::Not:
@@ -575,9 +576,51 @@ Resources:
             - !Ref PrivateSubnet
       TaskDefinition: !Ref FrontendTaskDefinition
 
+  # AUTO-SCALING  -------------------------------------------------------------
+  # TODO: Explain
+  # explain what a service role is
+  # https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_principal.html
+  # https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_terms-and-concepts.html#iam-term-service-role
   # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-auto-scaling.html
-  # TODO: AWS::ApplicationAutoScaling::ScalableTarget
-  # TODO: AWS::ApplicationAutoScaling::ScalingPolicy
+   
+  # Role needed to perform the scaling operations on our behalf.
+  AutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: BackendAutoScalingRole
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+  # Specifies a resource that Application Auto Scaling can scale.
+  AutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: 1
+      MaxCapacity: 3
+      ResourceId: service/ecsfs-cluster/ecsfs-backend-service
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      # Role to allow Application Auto Scaling to modify your scalable target.
+      RoleARN: !GetAtt AutoScalingRole.Arn
+
+  # Describes the rules for ECS to check and decide when it should scale up or
+  # down a service. In our application we just scale the backend.
+  AutoScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: BackendAutoScalingPolicy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 10
+        ScaleOutCooldown: 10
+        TargetValue: 50
 
   # SERVICE DISCOVERY =========================================================
   # By creating various DNS names under the same namespace, services that get
