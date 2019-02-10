@@ -1,6 +1,6 @@
 # ECS Full Stack
 
-Individually-Scalable Multi-Containerized Microservice Architecture Tutorial on AWS Fargate.
+Independently Scalable Multi-Container Microservices Architecture on AWS Fargate
 
 ## Overview
 
