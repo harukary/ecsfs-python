@@ -3,7 +3,7 @@
 # =============================================================================
 # This CloudFormation stack shows how to deploy a full-stack application
 # consisting of a backend, a frontend and an nginx server. Each defined as an
-# independent Fargate service.
+# independent Fargate service. The backend will auto-scale between 1 and 3.
 #
 # Two articles have been written explaining what this stack is for:
 #
@@ -21,7 +21,7 @@
 #   - https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-install.html
 #   - https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-configure.html
 #
-#   TL;DR: Basically you will need to install it with pip:
+#   TL;DR Basically you will need to install it with pip:
 #
 #     pip install awscli --upgrade --user 
 #
@@ -30,7 +30,7 @@
 #
 #     aws configure
 #
-#   To actually *deploy* the stack you have two choices (a) and (b)...
+#   To actually deploy the stack you have two choices (a) and (b)...
 #
 #   a) If you have no hosted zones set up (associated with a Route 53 domain):
 #
@@ -62,9 +62,9 @@
 #
 # Deleting all the resources that have been created
 # -------------------------------------------------
-# Either from the web console or from CLI. To do it from the web console you
-# will need to go under the CloudFormation page and delete it from there. If
-# you decide command line then:
+# Either from the web console or from CLI. To do it from the web console go to
+# the CloudFormation section and delete it there. The command line equivalent
+# is:
 #
 #   aws cloudformation delete-stack --stack-name ecsfs
 #
@@ -89,14 +89,13 @@ Conditions:
 
 Resources:
   # VIRTUAL PRIVATE CLOUD (VPC) ===============================================
-  # VPC for our containers to use. A VPC is simply a logically isolated chunk
-  # of the AWS Cloud.
+  # A VPC is simply a logically isolated chunk of the AWS Cloud.
   #
   # Our VPC has two public subnetworks since it's a requirement for an
-  # Application Load Balancer. Nginx will live in the public subnets too.
+  # Application Load Balancer. The nginx container will use them too.
   #
-  # Then one private subnet to be used by the backend and frontend containers
-  # as we do not want them to be reachable (public-facing).
+  # Then we will isolate backend and frontend to a private subnet so they can't
+  # be reached directly from the Internet.
   #
   # You will the word CIDR in various places, it is used for subnet masking.
   #
@@ -121,12 +120,12 @@ Resources:
       CidrBlock: 10.0.0.0/16
       Tags:                   # You can give
         - Key: Name           # pretty names to
-          Value: ECSFS VPC    # your resources
+          Value: ECSFS VPC    # your resources.
 
   PublicSubnetOne:
     Type: AWS::EC2::Subnet
     Properties:
-      # Selects the first availability zone on our current region.
+      # Select the first availability zone on our current region.
       AvailabilityZone: !Select         # !Select chooses an item from a list.
         - 0                             # First availability zone, since...
         - Fn::GetAZs: !Ref AWS::Region  # ...a region has various zones (list).
@@ -161,8 +160,8 @@ Resources:
   #     outbound traffic goes through it. In AWS it must get attached to a VPC.
   #
   #     All requests from a instances runnning on the public subnet must be
-  #     routed to the internet gateway, we achieve that by defining it on route
-  #     tables.
+  #     routed to the internet gateway. This is done by defining routes on
+  #     route tables.
   #
   # - Network Address Translation (NAT) Gateway:
   #
@@ -171,7 +170,7 @@ Resources:
   #     sent from the private instance assigning them a public IP so when the
   #     service the instance wants to talk you replies, the NAT can receive the
   #     information (since the NAT itself is public-facing and rechable from
-  #     the outside) and hand it back to the private instance.
+  #     the Internet) and hand it back to the private instance.
   #
   #     An Elastic IP needs to be associated with each NAT Gateway we create.
   #
@@ -300,8 +299,10 @@ Resources:
 
   # LOAD BALANCER =============================================================
   # The Application Load Balancer (ALB) is the single point of contact for
-  # clients. It is in charge of relaying the request to the right instance. For
-  # our case all requests on port 80 are sent to the container running nginx.
+  # clients (users). Its duty is to relay the request to the right running task
+  # (think of a task as an instance for now).
+  #
+  # In our case all requests on port 80 are forwarded to nginx task.
   #
   # To configure a load balancer we need to specify a listener and a target
   # group. The listener is described through rules, where you can specify
@@ -370,14 +371,14 @@ Resources:
   # launch type to use (EC2 instances or Fargate), and what memory and CPU
   # requirements need to be met.
   #
-  # Then a service is in charge of taking those tasks definitions and generate
-  # running and managing instances of them in a **cluster**. Those running
+  # Then a service is in charge of taking those tasks definitions to generate
+  # and manage running processes from them in a **cluster**. Those running
   # processes instanciated by the service are called **tasks**.
   #
   # Key ideas:
   #   * A cluster is a grouping of resources: services, task definitions, etc...
   #   * On a _task definition_...
-  #     - You can describe 1+ containers.
+  #     - You can describe one or more containers.
   #     - Desired CPU and memory needed to run that process.
   #   * A service takes a _task definition_ and instanciates it into running _tasks_.
   #   * _Task definitions_ and _services_ are configured per-cluster.
@@ -644,8 +645,8 @@ Resources:
   #
   # There's two modes when scaling a service, we use 'Target Tracking Scaling',
   # in which you specify a target value for a metric (say for instance 75% of
-  # CPU usage) and then Fargate would  spin more instances if the average of all
-  # the tasks running that service exceeed the threshold.
+  # CPU usage) and then Fargate would spin more instances when the average of
+  # all the tasks running that service exceed the threshold.
   #
   # In our case we will scale the backend between 1 and 3 instances and we will
   # specify a target CPU usage percentage of 50%.
@@ -702,7 +703,7 @@ Resources:
   # Then run the following command to stress the application. It will perform
   # 10,000 requests (1 per second) printing all the responses.
   #
-  #   ab -n 10000 -c 1 -v 3 
+  #   ab -n 10000 -c 1 -v 3 http://<application_load_balancer_dns_name>/
   #
   # I noticed that CloudWatch will wait until it has 3 consecutive measurements
   # (metric points) exceeding the target value specified (50%). It is then when
