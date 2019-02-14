@@ -175,6 +175,11 @@ Resources:
   #
   #     An Elastic IP needs to be associated with each NAT Gateway we create.
   #
+  #     The reason why we traffic private tasks' traffic through a NAT is so
+  #     tasks can pull the images from Docker Hub whilst keeping protection
+  #     since connections cannot be initiated from the Internet, just outbound
+  #     traffic will be allowed through the NAT.
+  #
   # - Routes and Route Tables:
   #
   #     Route tables gather together a set of routes. A route describes where
