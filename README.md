@@ -4,4 +4,6 @@ Independently Scalable Multi-Container Microservices Architecture on AWS Fargat
 
 ## Overview
 
+![AWS Diagram](diagram.png)
+
 Information and walkthrough coming soon.
