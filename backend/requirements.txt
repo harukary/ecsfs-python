@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+pymongo
+opensearch-py
+boto3
+requests_aws4auth

@@ -3,22 +3,38 @@ services:
   frontend:
     restart: always
     build: ./frontend
+    ports:
+      - "3000:3000"  # フロントエンドをローカルホストの3000ポートに公開
+    environment:
+      BACKEND: backend
     networks:
       ecsfs:
-        aliases:
-          - ecsfs-frontend.local
+  
   backend:
     restart: always
-    build: ./backend
+    build: 
+      context: ./backend
+      args:
+          - HTTP_PROXY=http://proxy.mei.co.jp:8080/
+          - HTTPS_PROXY=http://proxy.mei.co.jp:8080/
+          - NO_PROXY=localhost,127.0.0.1
+    ports:
+      - "5000:5000"
+    environment:
+      OPENSEARCH_HOST: opensearch
+      OPENSEARCH_PORT: 9200
+      DOCUMENTDB_HOST: documentdb
+      
     networks:
       ecsfs:
-        aliases:
-          - ecsfs-backend.local
+
   nginx:
     restart: always
-    build: ./nginx
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile_local
     ports:
-      - "80:80"
+      - "80:80"  # Nginxをローカルホストの80ポートに公開
     networks:
       ecsfs:
 

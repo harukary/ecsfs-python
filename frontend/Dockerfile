@@ -1,11 +1,11 @@
-FROM node:alpine
+FROM python:3.10
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
+COPY requirements.txt ./
 
-RUN npm install
+RUN pip install -r requirements.txt
 
-COPY server.js ./
+COPY app.py ./
 
-CMD npm start
+CMD ["python", "app.py"]

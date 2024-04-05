@@ -1,3 +1,9 @@
-backend/Pipfile
-backend/Pipfile.lock
+Pipfile
+Pipfile.lock
 frontend/node_modules
+
+.venv
+*.pem
+command.md
+
+notebook/

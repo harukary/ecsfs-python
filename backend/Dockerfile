@@ -1,11 +1,13 @@
-FROM python:alpine
-
-RUN pip install Flask
+FROM python:3.10
 
 WORKDIR /app
 
+RUN wget https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+
+COPY requirements.txt ./
+
+RUN pip install -r requirements.txt
+
 COPY app.py ./
 
-ENV FLASK_APP app.py
-
-CMD flask run --host=0.0.0.0
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "5000"]

@@ -1,0 +1,662 @@
+Parameters:
+  HostedZoneName:
+    Type: String
+    Description:
+      (Optional) If you have a domain available registered with Route 53 you
+      can type it (e.g. 'foo.com.'; do not miss the final dot!). Then a DNS
+      record gets created on subdomain ecsfs.foo.com which will route to the
+      load balancer (the entry point of this application).
+
+  FastAPIImageUri:
+    Type: String
+    Description: The URI of the FastAPI container image in ECR.
+
+  GradioImageUri:  
+    Type: String
+    Description: The URI of the Gradio container image in ECR.
+  
+  NginxImageUri:
+    Type: String
+    Description: The URI of the Nginx container image in ECR.
+  
+  DocumentDBUsername:
+    Type: String
+    Description: Username for DocumentDB Cluster
+    Default: admin27017
+
+  DocumentDBPassword:
+    Type: String
+    Description: Password for DocumentDB Cluster
+    Default: admin27017
+    NoEcho: true
+  
+  OpenSearchDomainName:
+    Type: String
+    Description: Domain name for OpenSearch
+    Default: ecsfs-opensearch-domain
+
+Conditions:
+  HasHostedZoneName:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: HostedZoneName
+          - ''
+
+Resources:
+  # VIRTUAL PRIVATE CLOUD (VPC) ===============================================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: 10.0.0.0/16
+      Tags:                   # You can give
+        - Key: Name           # pretty names to
+          Value: ECSFS VPC    # your resources.
+
+  PublicSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      # Select the first availability zone on our current region.
+      AvailabilityZone: !Select         # !Select chooses an item from a list.
+        - 0                             # First availability zone, since...
+        - Fn::GetAZs: !Ref AWS::Region  # ...a region has various zones (list).
+      CidrBlock: 10.0.0.0/24
+      VpcId: !Ref VPC
+
+  PublicSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 1  # Second availability zone under the same region.
+        - Fn::GetAZs: !Ref AWS::Region
+      CidrBlock: 10.0.1.0/24
+      VpcId: !Ref VPC
+
+  PrivateSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref AWS::Region
+      CidrBlock: 10.0.2.0/24
+      VpcId: !Ref VPC
+    
+  PrivateSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 1
+        - Fn::GetAZs: !Ref AWS::Region
+      CidrBlock: 10.0.3.0/24
+      VpcId: !Ref VPC
+
+  # NETWORK SETUP: ROUTING AND SUBNETTING =====================================
+  # Public routing ------------------------------------------------------------
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetOne
+
+  PublicSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetTwo
+
+  # Private routing -----------------------------------------------------------
+  NatElasticIP:
+    Type: AWS::EC2::EIP
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatElasticIP.AllocationId
+      SubnetId: !Ref PublicSubnetOne
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnetOne
+    
+  PrivateSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnetTwo
+ 
+  # SECURITY ==================================================================
+  FargateContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to Fargate containers.
+      VpcId: !Ref VPC
+
+  IngressFromPublicALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress from the public Application Load Balancer.
+      GroupId: !Ref FargateContainerSecurityGroup
+      IpProtocol: -1  # Means all protocols (TCD, UDP or any ICMP/ICMPv6 number).
+      SourceSecurityGroupId: !Ref PublicLoadBalancerSecurityGroup
+
+  IngressFromSelfSecurityGroup:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress from other containers in the same security group.
+      GroupId: !Ref FargateContainerSecurityGroup
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref FargateContainerSecurityGroup
+
+  PublicLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the public facing load balancer.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0  # Allows all IPs. Traffic from anywhere.
+          IpProtocol: -1
+  
+  DocumentDBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for DocumentDB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 27017
+          ToPort: 27017
+          SourceSecurityGroupId: !Ref FargateContainerSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+  
+  OpenSearchSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for OpenSearch
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref FargateContainerSecurityGroup
+
+  # LOAD BALANCER =============================================================
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: ecsfs-target-group
+      Port: 80
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VPC
+
+  ListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref PublicLoadBalancerSecurityGroup
+      Subnets:
+        - !Ref PublicSubnetOne
+        - !Ref PublicSubnetTwo
+
+  # If a hosted zone got specified when running this stack, we create a
+  # subdomain on that zone and route it to the load balancer. For instance, say
+  # 'example.com.' is specified as HostedZoneName, then all the traffic going to
+  # ecsfs.example.com would go to the load balancer.
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasHostedZoneName
+    Properties:
+      HostedZoneName: !Ref HostedZoneName
+      Name: !Join ['.', [ecsfs, !Ref HostedZoneName]]
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt LoadBalancer.DNSName
+        HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID
+
+  # ELASTIC CONTAINER SERVICE =================================================
+  # Cluster -------------------------------------------------------------------
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: ecsfs-cluster
+
+  # Logging -------------------------------------------------------------------
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: ecsfs-logs
+
+  # IAM Roles -----------------------------------------------------------------
+  DocumentDBAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "rds:DescribeDBClusters"
+              - "rds:DescribeDBInstances"
+              - "rds:ListTagsForResource"
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - "rds:Connect"
+            Resource:
+              - !Sub "arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:${DocumentDBCluster}"
+  
+  OpenSearchAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: es.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref OpenSearchAccessPolicy
+        
+  OpenSearchAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - es:ESHttp*
+            Resource: !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OpenSearchDomainName}/*
+              
+  EcsExecPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssmmessages:CreateControlChannel
+              - ssmmessages:CreateDataChannel
+              - ssmmessages:OpenControlChannel
+              - ssmmessages:OpenDataChannel
+            Resource: "*"
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsfs-execution-role
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - !Ref DocumentDBAccessPolicy
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsfs-task-role
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref EcsTaskPolicy
+        - !Ref OpenSearchAccessPolicy
+
+  EcsTaskPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - dynamodb:Query
+              - sqs:ReceiveMessage
+            Resource: "*"
+  
+  AutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: backend-auto-scaling-role
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+  
+  # DocumentDB ----------------------------------------------------------
+  DocumentDBSubnetGroup:
+    Type: AWS::DocDB::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet Group for DocumentDB
+      SubnetIds:
+        - !Ref PrivateSubnetOne
+        - !Ref PrivateSubnetTwo
+      DBSubnetGroupName: "docdb-subnet-group"
+
+  DocumentDBCluster:
+    Type: AWS::DocDB::DBCluster
+    Properties:
+      DBClusterIdentifier: ecsfs-docdb-cluster
+      MasterUsername: !Ref DocumentDBUsername
+      MasterUserPassword: !Ref DocumentDBPassword
+      DBSubnetGroupName: !Ref DocumentDBSubnetGroup
+      VpcSecurityGroupIds:
+        - !GetAtt DocumentDBSecurityGroup.GroupId
+      StorageEncrypted: true
+  
+  DocumentDBInstance:
+    Type: AWS::DocDB::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref DocumentDBCluster
+      DBInstanceClass: db.t3.medium
+      AutoMinorVersionUpgrade: true
+
+  # OpenSearch ----------------------------------------------------------
+  OpenSearchDomain:
+    Type: AWS::OpenSearchService::Domain
+    Properties:
+      DomainName: !Ref OpenSearchDomainName
+      EngineVersion: OpenSearch_2.11
+      ClusterConfig:
+        InstanceType: t3.small.search
+        InstanceCount: 1
+        DedicatedMasterEnabled: false
+        ZoneAwarenessEnabled: false
+      EBSOptions:
+        EBSEnabled: true
+        VolumeType: gp2
+        VolumeSize: 10
+      AccessPolicies:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt OpenSearchAccessRole.Arn
+            Action: es:*
+            Resource: !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OpenSearchDomainName}/*
+      VPCOptions:
+        SubnetIds:
+          - !Ref PrivateSubnetOne
+        SecurityGroupIds:
+          - !Ref OpenSearchSecurityGroup
+
+  # Task Definitions ----------------------------------------------------------
+  BackendTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: LogGroup
+    Properties:
+      Family: ecsfs-backend-td
+      Cpu: 256
+      Memory: 1024
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: ecsfs-backend-container
+          Image: !Ref FastAPIImageUri
+          PortMappings:
+            - ContainerPort: 5000
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: ecsfs-logs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: backend
+          Environment:
+            - Name: DOCUMENTDB_HOST
+              Value: !GetAtt DocumentDBCluster.Endpoint
+            - Name: DOCUMENTDB_USERNAME
+              Value: !Ref DocumentDBUsername
+            - Name: DOCUMENTDB_PASSWORD
+              Value: !Ref DocumentDBPassword
+            - Name: OPENSEARCH_HOST
+              Value: !GetAtt OpenSearchDomain.DomainEndpoint
+
+  FrontendTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: LogGroup
+    Properties:
+      Family: ecsfs-frontend-td
+      Cpu: 256
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !Ref ExecutionRole
+      ContainerDefinitions:
+        - Name: ecsfs-frontend-container
+          Image: !Ref GradioImageUri
+          PortMappings:
+            - ContainerPort: 3000
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: ecsfs-logs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: frontend
+
+  NginxTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: LogGroup
+    Properties:
+      Family: ecsfs-nginx-td
+      Cpu: 256
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !Ref ExecutionRole 
+      ContainerDefinitions:
+        - Name: ecsfs-nginx-container
+          Image: !Ref NginxImageUri
+          PortMappings:
+            - ContainerPort: 80
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: ecsfs-logs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: nginx
+
+  # Service Discovery ---------------------------------------------------------
+  LocalNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Vpc: !Ref VPC
+      Name: local
+
+  NginxLocalDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: ecsfs-nginx
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+        NamespaceId: !GetAtt LocalNamespace.Id
+
+  BackendLocalDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: ecsfs-backend
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+      NamespaceId: !GetAtt LocalNamespace.Id
+
+  FrontendLocalDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: ecsfs-frontend
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+      NamespaceId: !GetAtt LocalNamespace.Id
+
+  # Services ------------------------------------------------------------------
+  BackendService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: ecsfs-backend-service
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      DesiredCount: 1
+      ServiceRegistries:  # And that's how you associate ecsfs-backend.local!
+        - RegistryArn: !GetAtt BackendLocalDiscoveryService.Arn
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref FargateContainerSecurityGroup
+          Subnets:
+            - !Ref PrivateSubnetOne
+            - !Ref PrivateSubnetTwo
+      TaskDefinition: !Ref BackendTaskDefinition
+
+  FrontendService:
+    Type: AWS::ECS::Service
+    Properties:  # Associates it with the DNS name ecsfs-frontend.local.
+      ServiceName: ecsfs-frontend-service
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      DesiredCount: 1
+      ServiceRegistries:
+        - RegistryArn: !GetAtt FrontendLocalDiscoveryService.Arn
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref FargateContainerSecurityGroup
+          Subnets:
+            - !Ref PrivateSubnetOne
+      TaskDefinition: !Ref FrontendTaskDefinition
+
+  NginxService:
+    Type: AWS::ECS::Service
+    DependsOn: ListenerHTTP
+    Properties:
+      ServiceName: ecsfs-nginx-service
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      DesiredCount: 1
+      ServiceRegistries:  # Associate it with ecsfs-nginx.local DNS name.
+        - RegistryArn: !GetAtt NginxLocalDiscoveryService.Arn
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref FargateContainerSecurityGroup
+          Subnets:
+            - !Ref PublicSubnetOne
+            - !Ref PublicSubnetTwo
+      TaskDefinition: !Ref NginxTaskDefinition
+      LoadBalancers:
+        - ContainerName: ecsfs-nginx-container
+          ContainerPort: 80
+          TargetGroupArn: !Ref TargetGroup
+
+  # AUTO-SCALING  -------------------------------------------------------------
+  AutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: 1
+      MaxCapacity: 3
+      ResourceId: !Join ['/', [service, !Ref ECSCluster, !GetAtt BackendService.Name]]
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      RoleARN: !GetAtt AutoScalingRole.Arn
+
+  AutoScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: BackendAutoScalingPolicy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 900
+        ScaleOutCooldown: 300
+        TargetValue: 50
+
+# OUTPUTS =====================================================================
+Outputs:
+  LoadBalancerDNSName:
+    Description: Copy and paste this value into your browser to access the app.
+    Value: !GetAtt LoadBalancer.DNSName
+  
+  DocumentDBEndpoint:
+    Value: !GetAtt DocumentDBCluster.Endpoint

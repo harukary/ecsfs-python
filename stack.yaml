@@ -80,6 +80,17 @@ Parameters:
       record gets created on subdomain ecsfs.foo.com which will route to the
       load balancer (the entry point of this application).
 
+  FastAPIImageUri:
+    Type: String
+    Description: The URI of the FastAPI container image in ECR.
+
+  GradioImageUri:  
+    Type: String
+    Description: The URI of the Gradio container image in ECR.
+  
+  NginxImageUri:
+    Type: String
+    Description: The URI of the Nginx container image in ECR.
 # CONDITIONS ==================================================================
 # Allows to define boolean variables that we can use to conditionally build
 # some resources. You can set conditions for resource building by adding the
@@ -456,7 +467,7 @@ Resources:
       ExecutionRoleArn: !Ref ExecutionRole
       ContainerDefinitions:
         - Name: ecsfs-backend-container
-          Image: docwhite/ecsfs-backend
+          Image: !Ref FastAPIImageUri
           PortMappings:
             - ContainerPort: 5000
           LogConfiguration:
@@ -479,7 +490,7 @@ Resources:
       ExecutionRoleArn: !Ref ExecutionRole
       ContainerDefinitions:
         - Name: ecsfs-frontend-container
-          Image: docwhite/ecsfs-frontend
+          Image: !Ref GradioImageUri
           PortMappings:
             - ContainerPort: 3000
           LogConfiguration:
@@ -502,7 +513,7 @@ Resources:
       ExecutionRoleArn: !Ref ExecutionRole 
       ContainerDefinitions:
         - Name: ecsfs-nginx-container
-          Image: docwhite/ecsfs-nginx
+          Image: !Ref NginxImageUri
           PortMappings:
             - ContainerPort: 80
           LogConfiguration:
